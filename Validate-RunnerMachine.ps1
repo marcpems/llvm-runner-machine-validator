@@ -365,7 +365,7 @@ Invoke-Check -Name "ASan known-failing-test exclusion overlay (git hook) install
             return @{ Pass = $false; Detail = "core.hooksPath is set to '$configuredPath' but no post-checkout hook exists there." }
         }
         $content = Get-Content $resolvedHook -Raw
-        $missing = $knownExclusions | Where-Object { $content -notmatch [regex]::Escape($_) }
+        $missing = @($knownExclusions | Where-Object { $content -notmatch [regex]::Escape($_) })
         if ($missing.Count -gt 0) {
             return @{ Pass = $false; Detail = "post-checkout hook exists but is missing exclusion(s): $($missing -join ', ')" }
         }
@@ -398,6 +398,48 @@ Invoke-Check -Name "Sufficient free disk space for a release build" `
         return @{ Pass = $false; Detail = "Only $freeGB GB free on $driveLetter - below the 150 GB recommended minimum." }
     } `
     -Fix $null   # Freeing disk space safely is not something to automate blindly.
+
+# ---------------------------------------------------------------------------
+# CHECK 9 - Windows Defender excludes the runner work directory
+# Root cause history: a heavily-parallel link step intermittently failed with
+# "lld-link: error: failed to write output 'bin\clang.exe': permission
+# denied" - caused by Defender's real-time scanner transiently locking
+# freshly-written executables while many linker processes finish within the
+# same second. Defender was enabled with exclusions for unrelated paths
+# (C:\CloudBuildCache, C:\src) but NOT the actual runner work directory.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Windows Defender excludes the runner work directory" `
+    -Impact "Without this exclusion, real-time scanning can transiently lock freshly-linked .exe/.lib files during heavily-parallel build steps, causing intermittent 'permission denied' link failures that waste a multi-hour build run. These failures are non-deterministic and hard to diagnose from the build log alone." `
+    -ManualAction "Add a Windows Defender exclusion for the runner install/work directory, e.g.: Add-MpPreference -ExclusionPath 'D:\actions-runner' (adjust to actual install path), and consider process exclusions for clang.exe / lld-link.exe / ninja.exe." `
+    -Detect {
+        $dir = Find-RunnerDir
+        if (-not $dir) {
+            return @{ Pass = $false; Detail = "Could not auto-detect the runner install directory to verify against Defender exclusions." }
+        }
+        try {
+            $prefs = Get-MpPreference -ErrorAction Stop
+        } catch {
+            return @{ Pass = $true; Detail = "Windows Defender / Get-MpPreference not available on this machine (e.g. third-party AV in use, or Defender module absent) - nothing to check here." }
+        }
+        $excluded = @($prefs.ExclusionPath | Where-Object { $_ -and ($dir -like "$_*") })
+        if ($excluded.Count -gt 0) {
+            return @{ Pass = $true; Detail = "Runner directory '$dir' is covered by Defender exclusion '$($excluded[0])'." }
+        }
+        return @{ Pass = $false; Detail = "Runner directory '$dir' is NOT in Defender's ExclusionPath list (current exclusions: $($prefs.ExclusionPath -join ', '))." }
+    } `
+    -Fix {
+        $dir = Find-RunnerDir
+        if (-not $dir) { return $false }
+        try {
+            Add-MpPreference -ExclusionPath $dir -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "clang.exe" -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionProcess "lld-link.exe" -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionProcess "ninja.exe" -ErrorAction SilentlyContinue
+            return $true
+        } catch {
+            return $false
+        }
+    }
 
 # ---------------------------------------------------------------------------
 # Report

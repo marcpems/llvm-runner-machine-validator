@@ -40,6 +40,7 @@ run for later reference / auditing.
 | 6 | GitHub Actions Runner process running | If the listener isn't running, the machine can't pick up any dispatched job at all. |
 | 7 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. |
 | 8 | Sufficient free disk space (>= 150 GB recommended) | A full release build+package run can exhaust disk space mid-build, wasting a multi-hour run. This is flagged, not auto-fixed (freeing space safely requires human judgment). |
+| 9 | Windows Defender excludes the runner work directory | A heavily-parallel link step intermittently failed with `lld-link: error: failed to write output 'bin\clang.exe': permission denied` - Defender's real-time scanner was transiently locking freshly-linked executables because its exclusion list covered unrelated paths but not the actual runner work directory. Non-deterministic and easy to mistake for a code/build-system bug. |
 
 ## Design principles
 
