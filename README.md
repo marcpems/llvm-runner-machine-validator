@@ -33,12 +33,12 @@ run for later reference / auditing.
 | # | Check | Real incident it prevents |
 |---|-------|----------------------------|
 | 1 | VS2022 Build Tools (C++ workload) installed | Build needs an MSVC toolchain; missing = immediate cmake/MSBuild failure. |
-| 2 | No conflicting newer VS toolchain (e.g. VS2026) present | A VS2026 install on the same machine was picked up ahead of VS2022, silently changing the MSVC ABI/runtime and breaking ASan interceptor tests (`Asan-x86_64-*-Dynamic-Test`, `memset_test.cpp`, `intercept_memcpy.cpp`, `dll_intercept_memcpy_indirect.cpp`). |
+| 2 | No conflicting newer VS toolchain (e.g. VS2026) present | A VS2026 install on the same machine was picked up ahead of VS2022, silently changing the MSVC ABI/runtime and breaking ASan interceptor tests (`Asan-x86_64-*-Dynamic-Test`, `memset_test.cpp`, `intercept_memcpy.cpp`, `dll_intercept_memcpy_indirect.cpp`). **Intel (x64) only** - auto-passes (skipped) on ARM64, since ASan interceptor tests are not built/run there and this failure mode cannot occur. |
 | 3 | Git for Windows installed and first on PATH | Wrong git.exe / missing Git for Windows broke checkout/build tooling that shells out to `git`. |
 | 4 | 7-Zip (`7z.exe`) installed | The final release-packaging step failed with `'7z' is not recognized as an internal or external command` **after** a full multi-hour build+test run had already completed. |
 | 5 | 7-Zip directory present on machine-level PATH | `7z.exe` existed but wasn't reachable, same failure as above. **Known quirk:** a machine PATH change is not picked up by an already-running process (including an already-running runner) until it is restarted - the script calls this out explicitly. |
 | 6 | GitHub Actions Runner process running | If the listener isn't running, the machine can't pick up any dispatched job at all. |
-| 7 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. |
+| 7 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. **Intel (x64) only** - auto-passes (skipped) on ARM64, since these ASan tests are not built/run there and the overlay is unnecessary. |
 | 8 | Sufficient free disk space (>= 150 GB recommended) | A full release build+package run can exhaust disk space mid-build, wasting a multi-hour run. This is flagged, not auto-fixed (freeing space safely requires human judgment). |
 | 9 | Windows Defender excludes the runner work directory | A heavily-parallel link step intermittently failed with `lld-link: error: failed to write output 'bin\clang.exe': permission denied` - Defender's real-time scanner was transiently locking freshly-linked executables because its exclusion list covered unrelated paths but not the actual runner work directory. Non-deterministic and easy to mistake for a code/build-system bug. |
 
@@ -53,6 +53,12 @@ run for later reference / auditing.
   explanation of *why it matters* and *exactly what to do*, never silently skipped.
 * **Detect-only by default.** Nothing changes on the machine unless you pass
   `-ApplyFixes`.
+* **Architecture-aware.** Checks #2 and #7 exist solely to prevent ASan interceptor
+  test failures, and ASan interceptor tests are only built/run on Intel (x64). The
+  script detects ARM64 machines (`$env:PROCESSOR_ARCHITECTURE` /
+  `RuntimeInformation.ProcessArchitecture`) and automatically skips (auto-passes)
+  those two checks there, so an ARM64 runner is never flagged for, or has fixes
+  applied for, an issue that cannot occur on it.
 * **Self-contained.** Single PowerShell script, no external dependencies beyond
   tools already expected on a build machine (`git`, `winget`, `vswhere.exe` if VS is
   present).

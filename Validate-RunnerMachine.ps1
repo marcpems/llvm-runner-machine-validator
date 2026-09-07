@@ -46,6 +46,13 @@ param(
 $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $LogPath) { $LogPath = Join-Path $scriptRoot "reports" }
 
+# Architecture detection: the VS2026/VS2022-conflict and ASan-test-exclusion
+# issues below are specific to the Intel (x64) ASan interceptor test suite -
+# ASan tests are not built/run on ARM64, so those two checks are gated to
+# skip (auto-pass) on ARM64 machines rather than being flagged or "fixed".
+$isArm64 = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or
+           ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64)
+
 $ErrorActionPreference = 'Stop'
 $results = New-Object System.Collections.Generic.List[object]
 
@@ -137,6 +144,8 @@ function Find-RunnerDir {
     return $null
 }
 
+Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) { '(ARM64 - ASan-specific checks below will be skipped)' } else { '(Intel/x64 - ASan-specific checks apply)' })" -ForegroundColor DarkGray
+
 # ---------------------------------------------------------------------------
 # CHECK 1 - VS2022 Build Tools with C++ workload present
 # Root cause history: builds require MSVC toolchain from VS2022 specifically;
@@ -165,9 +174,12 @@ Invoke-Check -Name "VS2022 Build Tools (C++ workload) installed" `
 # of VS2022, breaking ASan interceptors during lit tests.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "No conflicting newer Visual Studio (e.g. 2026) toolchain present" `
-    -Impact "If a newer VS toolchain (major version 18+) is installed alongside VS2022, build scripts/vswhere may resolve to it instead, producing a different MSVC ABI/runtime that is known to break ASan interceptor tests (Asan-x86_64-*-Dynamic-Test, memset_test.cpp, intercept_memcpy.cpp, dll_intercept_memcpy_indirect.cpp)." `
+    -Impact "If a newer VS toolchain (major version 18+) is installed alongside VS2022, build scripts/vswhere may resolve to it instead, producing a different MSVC ABI/runtime that is known to break ASan interceptor tests (Asan-x86_64-*-Dynamic-Test, memset_test.cpp, intercept_memcpy.cpp, dll_intercept_memcpy_indirect.cpp) on Intel (x64) machines. Not applicable on ARM64 - ASan interceptor tests are not built/run there, so this specific failure mode cannot occur." `
     -ManualAction "Uninstall the newer Visual Studio / Build Tools instance (Add-or-remove-programs, or the Visual Studio Installer 'Uninstall' action) so only VS2022 remains, OR reconfigure the build to explicitly pin the VS2022 vcvars path. This is deliberately NOT auto-uninstalled by this script (destructive, slow, and interactive)." `
     -Detect {
+        if ($isArm64) {
+            return @{ Pass = $true; Detail = "Skipped: this machine is ARM64. The known VS2026-vs-VS2022 conflict only matters for the Intel (x64) ASan interceptor tests, which are not run on ARM64." }
+        }
         $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
         if (-not (Test-Path $vswhere)) {
             return @{ Pass = $true; Detail = "vswhere.exe not found - nothing to conflict with (see previous check)." }
@@ -353,9 +365,12 @@ exit 0
 '@
 
 Invoke-Check -Name "ASan known-failing-test exclusion overlay (git hook) installed" `
-    -Impact "Without this overlay, 5 known-failing ASan interceptor tests (which are environment-specific, not code regressions) will cause lit test-suite failures partway through the multi-hour build, wasting the entire run." `
+    -Impact "Without this overlay, 5 known-failing ASan interceptor tests (which are environment-specific, not code regressions) will cause lit test-suite failures partway through the multi-hour build, wasting the entire run. This ONLY applies to Intel (x64) machines - ASan interceptor tests are not built/run on ARM64, so this overlay is unnecessary there." `
     -ManualAction "Create $hookFile with content that appends these tests to LIT_FILTER_OUT via a post-checkout hook: $($knownExclusions -join ', '). Then run: git config --global core.hooksPath $hookDir" `
     -Detect {
+        if ($isArm64) {
+            return @{ Pass = $true; Detail = "Skipped: this machine is ARM64. The ASan interceptor tests this overlay excludes are not built/run on ARM64, so the overlay is not needed here." }
+        }
         $configuredPath = (git config --global core.hooksPath 2>$null)
         if (-not $configuredPath) {
             return @{ Pass = $false; Detail = "git config --global core.hooksPath is not set." }
@@ -372,6 +387,7 @@ Invoke-Check -Name "ASan known-failing-test exclusion overlay (git hook) install
         return @{ Pass = $true; Detail = "hooksPath='$configuredPath', hook present and contains all $($knownExclusions.Count) known exclusions." }
     } `
     -Fix {
+        if ($isArm64) { return $true }   # nothing to fix on ARM64; Detect already reports Pass.
         New-Item -ItemType Directory -Path $hookDir -Force | Out-Null
         Set-Content -Path $hookFile -Value $hookBody -NoNewline -Encoding ASCII
         git config --global core.hooksPath $hookDir
