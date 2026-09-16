@@ -236,7 +236,41 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 4 - 7-Zip installed (needed by the release packaging step)
+# CHECK 4 - Bash available (needed by LLVM release build/test steps that
+# shell out to bash, e.g. lit test-suite helper scripts and symbolizer
+# wrappers invoked from the Windows release build). Bash normally ships
+# alongside Git for Windows at C:\Program Files\Git\bin\bash.exe.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Bash available" `
+    -Impact "Some LLVM release build/test steps shell out to 'bash' (e.g. lit-driven test-suite scripts and helper wrappers). If bash.exe cannot be resolved, those steps fail with 'bash is not recognized' partway through a multi-hour build/test run." `
+    -ManualAction "Install Git for Windows ('winget install --id Git.Git -e'), which ships bash.exe at 'C:\Program Files\Git\bin', and ensure that directory is on PATH." `
+    -Detect {
+        $found = (Get-Command bash.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($found) {
+            return @{ Pass = $true; Detail = "bash.exe resolves via PATH: $found" }
+        }
+        $gitBash = "C:\Program Files\Git\bin\bash.exe"
+        if (Test-Path $gitBash) {
+            return @{ Pass = $false; Detail = "bash.exe exists at '$gitBash' (from Git for Windows) but is not on PATH." }
+        }
+        return @{ Pass = $false; Detail = "bash.exe not found on PATH and not present at the expected Git for Windows location ($gitBash)." }
+    } `
+    -Fix {
+        $gitBash = "C:\Program Files\Git\bin\bash.exe"
+        if (-not (Test-Path $gitBash)) {
+            Write-Host "    Installing Git for Windows via winget (provides bash.exe)..." -ForegroundColor Yellow
+            winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        }
+        if (Test-Path $gitBash) {
+            Add-MachinePathEntry -Dir "C:\Program Files\Git\bin"
+            Write-Host "    NOTE: machine PATH updated. If the runner process is already running, it will NOT see this change until it is restarted (known propagation quirk)." -ForegroundColor Yellow
+            return $true
+        }
+        return $false
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 5 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -255,12 +289,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 6 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 6's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 7's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -289,7 +323,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - GitHub Actions Runner process is installed and running
+# CHECK 7 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -310,7 +344,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 5.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 6.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -320,7 +354,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 8 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
