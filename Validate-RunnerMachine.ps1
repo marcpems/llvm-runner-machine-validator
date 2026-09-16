@@ -171,26 +171,53 @@ function Find-GitForWindows {
 Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) { '(ARM64 - ASan-specific checks below will be skipped)' } else { '(Intel/x64 - ASan-specific checks apply)' })" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
-# CHECK 1 - VS2022 Build Tools with C++ workload present
-# Root cause history: builds require MSVC toolchain from VS2022 specifically;
-# ASan interceptor tests were observed to fail under a different VS toolset.
+# CHECK 1 - VS2022 Build Tools with C++ workload present, matching the HOST
+# CPU architecture. Root cause history: builds require MSVC toolchain from
+# VS2022 specifically; ASan interceptor tests were observed to fail under a
+# different VS toolset. On ARM64 runners specifically, requiring only the
+# x86.x64 component does NOT guarantee a working host-native cl.exe - it can
+# silently leave the machine with just the x64-hosted cross toolset (which
+# runs under x64 emulation on ARM64, or may be entirely absent), so the
+# required component and the on-disk cl.exe are both checked per-architecture.
 # ---------------------------------------------------------------------------
-Invoke-Check -Name "VS2022 Build Tools (C++ workload) installed" `
-    -Impact "Without this, cmake/MSBuild cannot find a usable MSVC toolchain and the build fails immediately, or picks up the wrong compiler version." `
-    -ManualAction "Install 'Visual Studio Build Tools 2022' (or VS2022 with Desktop C++ workload) via https://visualstudio.microsoft.com/downloads/ or 'winget install --id Microsoft.VisualStudio.2022.BuildTools'. Ensure the 'Desktop development with C++' workload (component Microsoft.VisualStudio.Component.VC.Tools.x86.x64) is selected." `
+$vcToolsComponent = if ($isArm64) { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+$vcHostArchDir = if ($isArm64) { 'HostARM64\ARM64' } else { 'Hostx64\x64' }
+Invoke-Check -Name "VS2022 Build Tools (C++ workload, $(if ($isArm64) { 'ARM64' } else { 'x64' }) host toolset) installed" `
+    -Impact "Without this, cmake/MSBuild cannot find a usable MSVC toolchain and the build fails immediately, or picks up the wrong compiler version. $(if ($isArm64) { "On ARM64 runners specifically, the x86.x64 component alone does not guarantee a working native cl.exe for this host CPU - the '$vcToolsComponent' component (providing '$vcHostArchDir\cl.exe') is required for a real Intel/x64 vs. ARM64 toolset match." } else { '' })" `
+    -ManualAction "Install 'Visual Studio Build Tools 2022' (or VS2022 with Desktop C++ workload) via https://visualstudio.microsoft.com/downloads/ or 'winget install --id Microsoft.VisualStudio.2022.BuildTools'. Ensure the 'Desktop development with C++' workload including component '$vcToolsComponent' is selected$(if ($isArm64) { " (this is the ARM64-native toolset - NOT the same as the default x86.x64 component)" } else { '' })." `
     -Detect {
         $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
         if (-not (Test-Path $vswhere)) {
             return @{ Pass = $false; Detail = "vswhere.exe not found - no Visual Studio installer present at all." }
         }
-        $instances = & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+        $instances = & $vswhere -all -products * -requires $vcToolsComponent -format json | ConvertFrom-Json
         $vs2022 = $instances | Where-Object { $_.installationVersion -like '17.*' }
-        if ($vs2022) {
-            return @{ Pass = $true; Detail = "Found: $($vs2022[0].displayName) $($vs2022[0].installationVersion) at $($vs2022[0].installationPath)" }
+        if (-not $vs2022) {
+            return @{ Pass = $false; Detail = "No VS2022 (version 17.x) instance with the '$vcToolsComponent' component was found." }
         }
-        return @{ Pass = $false; Detail = "No VS2022 (version 17.x) instance with the VC.Tools.x86.x64 component was found." }
+        $installPath = $vs2022[0].installationPath
+        $msvcRoot = Join-Path $installPath 'VC\Tools\MSVC'
+        $cl = Get-ChildItem -Path $msvcRoot -Filter 'cl.exe' -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -like "*\$vcHostArchDir\cl.exe" } | Select-Object -First 1
+        if (-not $cl) {
+            return @{ Pass = $false; Detail = "VS2022 with '$vcToolsComponent' reported by vswhere at $installPath, but no '$vcHostArchDir\cl.exe' was found on disk under '$msvcRoot' - the component may be partially installed or corrupted." }
+        }
+        return @{ Pass = $true; Detail = "Found: $($vs2022[0].displayName) $($vs2022[0].installationVersion) at $installPath, with $vcHostArchDir\cl.exe at $($cl.FullName)." }
     } `
-    -Fix $null   # Installing VS is heavy/interactive - deliberately not auto-installed.
+    -Fix {
+        # If VS2022 is already installed but just missing this one component,
+        # modify the existing install in place (targeted, non-destructive) -
+        # this is NOT a full VS install from scratch, so it's safe to automate.
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (-not (Test-Path $vswhere)) { return $false }
+        $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+        $instances = & $vswhere -all -products * -format json | ConvertFrom-Json
+        $vs2022 = $instances | Where-Object { $_.installationVersion -like '17.*' } | Select-Object -First 1
+        if (-not $vs2022 -or -not (Test-Path $vsInstaller)) { return $false }
+        Write-Host "    Adding component '$vcToolsComponent' to existing VS2022 install at $($vs2022.installationPath)..." -ForegroundColor Yellow
+        & $vsInstaller modify --installPath "$($vs2022.installationPath)" --add $vcToolsComponent --quiet --norestart | Out-Null
+        $true
+    }
 
 # ---------------------------------------------------------------------------
 # CHECK 2 - No newer/conflicting VS toolchain (e.g. VS2026) shadowing VS2022

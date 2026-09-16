@@ -35,7 +35,7 @@ run for later reference / auditing.
 
 | # | Check | Real incident it prevents |
 |---|-------|----------------------------|
-| 1 | VS2022 Build Tools (C++ workload) installed | Build needs an MSVC toolchain; missing = immediate cmake/MSBuild failure. |
+| 1 | VS2022 Build Tools (C++ workload, host-architecture-matched toolset) installed | Build needs an MSVC toolchain; missing = immediate cmake/MSBuild failure. **Architecture-aware:** on x64 hosts requires the `VC.Tools.x86.x64` component; on ARM64 hosts requires `VC.Tools.ARM64` specifically (the x86.x64 component alone does not guarantee a working native `HostARM64\ARM64\cl.exe`) and verifies `cl.exe` actually exists on disk for the host's `Host<Arch>\<Arch>` toolset directory, not just that vswhere reports the component as installed. |
 | 2 | No conflicting newer VS toolchain (e.g. VS2026) present | A VS2026 install on the same machine was picked up ahead of VS2022, silently changing the MSVC ABI/runtime and breaking ASan interceptor tests (`Asan-x86_64-*-Dynamic-Test`, `memset_test.cpp`, `intercept_memcpy.cpp`, `dll_intercept_memcpy_indirect.cpp`). **Intel (x64) only** - auto-passes (skipped) on ARM64, since ASan interceptor tests are not built/run there and this failure mode cannot occur. |
 | 3 | CMake installed (minimum version) | LLVM's configure step is driven by CMake. Missing or too-old `cmake.exe` fails the configure step immediately with `'cmake' is not recognized` or a `CMake x.y or higher is required` error, before any compilation starts. |
 | 4 | Ninja installed | The LLVM release build is configured with `-G Ninja`. If `ninja.exe` is missing/not on PATH, CMake configure fails immediately with `CMake Error: ... generator Ninja is not installed`, before any compilation starts. |
