@@ -259,7 +259,36 @@ Invoke-Check -Name "CMake installed (minimum version)" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 4 - Git for Windows installed and first on PATH
+# CHECK 4 - Ninja installed (build generator used by the LLVM release build)
+# Root cause history: ninja missing caused an immediate CMake configure
+# failure ("CMake Error: CMAKE_GENERATOR was set but the generator
+# 'Ninja' is not installed") before any compilation could start.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Ninja installed" `
+    -Impact "The LLVM release build is configured with '-G Ninja'. If ninja.exe is missing or not on PATH, the CMake configure step fails immediately with 'CMake Error: ... generator Ninja is not installed', before any compilation starts." `
+    -ManualAction "Install Ninja: 'winget install --id Ninja-build.Ninja -e' (or download from https://github.com/ninja-build/ninja/releases), then ensure the folder containing 'ninja.exe' is on PATH." `
+    -Detect {
+        $ninja = (Get-Command ninja.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($ninja) {
+            return @{ Pass = $true; Detail = "ninja.exe found at $ninja." }
+        }
+        return @{ Pass = $false; Detail = "ninja.exe not found on PATH." }
+    } `
+    -Fix {
+        Write-Host "    Installing Ninja via winget..." -ForegroundColor Yellow
+        winget install --id Ninja-build.Ninja -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        # winget adds its shim to the current USER's PATH (not necessarily
+        # machine-level), which the current process won't see until it
+        # refreshes its environment - so re-read Path from both scopes
+        # (like Windows does at process start) before re-checking.
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        [bool](Get-Command ninja.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 5 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -299,7 +328,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - Bash available (needed by LLVM release build/test steps that
+# CHECK 6 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -340,7 +369,7 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - 7-Zip installed (needed by the release packaging step)
+# CHECK 7 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -359,12 +388,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 8 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 8's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 9's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -393,7 +422,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - GitHub Actions Runner process is installed and running
+# CHECK 9 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -414,7 +443,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 7.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 8.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -424,7 +453,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 9 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 10 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
