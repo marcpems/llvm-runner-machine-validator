@@ -315,7 +315,55 @@ Invoke-Check -Name "Ninja installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - Python 3 installed (LLDB build + CMake Python3 detection)
+# CHECK 5 - clang-cl (recent LLVM release) available for accelerated stage0
+# Root cause history: the official release script auto-detects clang-cl and
+# lld-link on PATH and, if both work, uses them (with -fuse-ld=lld) to build
+# the stage0 bootstrap compiler INSTEAD of plain MSVC - this is significantly
+# faster and is how the official Windows release builds are actually
+# produced upstream. It's not fatal if missing (the script silently falls
+# back to MSVC via --force-msvc semantics), but a missing/stale/broken
+# clang-cl silently degrades every build on this machine to the slower MSVC
+# stage0 path without any error ever being surfaced.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "clang-cl (recent LLVM release) available" `
+    -Impact "If 'clang-cl --version' and 'lld-link --version' both succeed, build_llvm_release.bat uses clang-cl+lld-link (instead of plain MSVC) to build the stage0 bootstrap compiler, which is noticeably faster and matches how upstream official Windows releases are built. This is NOT fatal if missing - the script silently falls back to MSVC - but that fallback is silent, so a missing or too-old clang-cl quietly makes every build slower without ever failing or logging a warning." `
+    -ManualAction "Install a recent LLVM/Clang release for Windows: 'winget install --id LLVM.LLVM -e' (ensure 'C:\Program Files\LLVM\bin' - containing both clang-cl.exe and lld-link.exe - ends up on PATH)." `
+    -Detect {
+        $clangCl = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $clangCl) {
+            return @{ Pass = $false; Detail = "clang-cl.exe not found on PATH." }
+        }
+        $lldLink = (Get-Command lld-link.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $lldLink) {
+            return @{ Pass = $false; Detail = "clang-cl.exe found at $clangCl, but lld-link.exe is not on PATH - the release script requires BOTH to work before it will use clang-cl for stage0." }
+        }
+        $versionOutput = & $clangCl --version 2>$null | Select-Object -First 1
+        if ($versionOutput -notmatch 'clang version (\d+)\.(\d+)\.(\d+)') {
+            return @{ Pass = $false; Detail = "Found clang-cl.exe at $clangCl but could not parse an LLVM/clang version from '$versionOutput' - it may not be a real LLVM clang-cl (e.g. a stale shim/alias)." }
+        }
+        $found = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        $minimum = [version]"17.0.0"
+        if ($found -lt $minimum) {
+            return @{ Pass = $false; Detail = "clang-cl $found found at $clangCl, but this is older than the recommended minimum ($minimum) for a 'recent' release build - consider updating." }
+        }
+        return @{ Pass = $true; Detail = "clang-cl $found found at $clangCl, lld-link found at $lldLink (>= $minimum recommended minimum)." }
+    } `
+    -Fix {
+        Write-Host "    Installing LLVM (clang-cl, lld-link) via winget..." -ForegroundColor Yellow
+        winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        $defaultBin = "${env:ProgramFiles}\LLVM\bin"
+        if ((Test-Path (Join-Path $defaultBin 'clang-cl.exe')) -and ((Get-MachinePath) -split ';' -notcontains $defaultBin)) {
+            Add-MachinePathEntry -Dir $defaultBin
+            $env:Path = "$env:Path;$defaultBin"
+        }
+        [bool](Get-Command clang-cl.exe -ErrorAction SilentlyContinue) -and [bool](Get-Command lld-link.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 6 - Python 3 installed (LLDB build + CMake Python3 detection)
 # Root cause history: the official release script hardcodes an expected
 # Python 3.11 install location (unless --local-python is passed, in which
 # case it resolves 'where python.exe'); a missing/unusable Python breaks
@@ -354,7 +402,7 @@ Invoke-Check -Name "Python 3 installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - Perl installed (needed by the OpenMP runtime's build)
+# CHECK 7 - Perl installed (needed by the OpenMP runtime's build)
 # Root cause history: OpenMP's build system shells out to 'perl' for its
 # source/config generation steps; without it, runtimes configuration fails.
 # ---------------------------------------------------------------------------
@@ -384,7 +432,7 @@ Invoke-Check -Name "Perl installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - SWIG installed (needed by LLDB's Python scripting bindings)
+# CHECK 8 - SWIG installed (needed by LLDB's Python scripting bindings)
 # Root cause history: LLDB's build generates Python bindings via SWIG;
 # the official release script notes SWIG 4.1.1 specifically should be used.
 # ---------------------------------------------------------------------------
@@ -408,7 +456,7 @@ Invoke-Check -Name "SWIG installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - Git for Windows installed and first on PATH
+# CHECK 9 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -448,7 +496,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 9 - Bash available (needed by LLVM release build/test steps that
+# CHECK 10 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -489,7 +537,7 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 10 - GNU-style 'mv' and 'tar' utilities available
+# CHECK 11 - GNU-style 'mv' and 'tar' utilities available
 # Root cause history: build_llvm_release.bat directly shells out to 'mv'
 # (to rename the extracted source archive) and 'tar' (to unpack the
 # libxml2/zlib/zstd source tarballs it downloads). Neither ships as a
@@ -530,7 +578,7 @@ Invoke-Check -Name "GNU-style 'mv' and 'tar' utilities available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 11 - curl available (used to download the LLVM source archive and
+# CHECK 12 - curl available (used to download the LLVM source archive and
 # libxml2/zlib/zstd dependency tarballs)
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "curl available" `
@@ -553,7 +601,7 @@ Invoke-Check -Name "curl available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 12 - 7-Zip installed (needed by the release packaging step)
+# CHECK 13 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -586,12 +634,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 13 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 14 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 14's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 15's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -620,7 +668,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 14 - GitHub Actions Runner process is installed and running
+# CHECK 15 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -641,7 +689,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 13.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 14.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -651,7 +699,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 15 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 16 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
