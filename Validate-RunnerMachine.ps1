@@ -288,7 +288,100 @@ Invoke-Check -Name "Ninja installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - Git for Windows installed and first on PATH
+# CHECK 5 - Python 3 installed (LLDB build + CMake Python3 detection)
+# Root cause history: the official release script hardcodes an expected
+# Python 3.11 install location (unless --local-python is passed, in which
+# case it resolves 'where python.exe'); a missing/unusable Python breaks
+# CMake's Python3 detection used by LLDB and other components.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Python 3 installed" `
+    -Impact "CMake's Python3 detection (used by LLDB and other build steps) requires a working python.exe. The official build_llvm_release.bat expects Python 3.11 at a fixed per-user path unless run with --local-python (which instead resolves 'where python.exe'). Either way, a missing/broken Python install fails CMake configuration." `
+    -ManualAction "Install Python 3.11: 'winget install --id Python.Python.3.11 -e'. If invoking build_llvm_release.bat WITHOUT --local-python, it expects this install at '%LOCALAPPDATA%\Programs\Python\Python311' (the default winget/python.org install location) - do not use the Microsoft Store package." `
+    -Detect {
+        $python = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $python) {
+            return @{ Pass = $false; Detail = "python.exe not found on PATH." }
+        }
+        try {
+            $versionOutput = & $python --version 2>&1
+        } catch {
+            return @{ Pass = $false; Detail = "python.exe found at $python but failed to run ('$($_.Exception.Message)') - likely the Microsoft Store app-execution-alias stub rather than a real install." }
+        }
+        if ($versionOutput -notmatch '(\d+)\.(\d+)\.(\d+)') {
+            return @{ Pass = $false; Detail = "Found python.exe at $python but could not parse its version from '$versionOutput'." }
+        }
+        $found = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        $minimum = [version]"3.9.0"
+        if ($found -ge $minimum) {
+            return @{ Pass = $true; Detail = "Python $found found at $python (>= $minimum minimum required by LLVM's CMake build)." }
+        }
+        return @{ Pass = $false; Detail = "Python $found found at $python, but LLVM's build requires >= $minimum." }
+    } `
+    -Fix {
+        Write-Host "    Installing Python 3.11 via winget..." -ForegroundColor Yellow
+        winget install --id Python.Python.3.11 -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        [bool](Get-Command python.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 6 - Perl installed (needed by the OpenMP runtime's build)
+# Root cause history: OpenMP's build system shells out to 'perl' for its
+# source/config generation steps; without it, runtimes configuration fails.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Perl installed" `
+    -Impact "LLVM's OpenMP runtime build shells out to 'perl' during its configure/generation steps. Without a working perl.exe on PATH, building the 'runtimes' (openmp) component fails." `
+    -ManualAction "Install Strawberry Perl: 'winget install --id StrawberryPerl.StrawberryPerl -e', then ensure its 'perl\bin' directory is on PATH." `
+    -Detect {
+        $perl = (Get-Command perl.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($perl) {
+            return @{ Pass = $true; Detail = "perl.exe found at $perl." }
+        }
+        return @{ Pass = $false; Detail = "perl.exe not found on PATH." }
+    } `
+    -Fix {
+        Write-Host "    Installing Strawberry Perl via winget..." -ForegroundColor Yellow
+        winget install --id StrawberryPerl.StrawberryPerl -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        if (-not (Get-Command perl.exe -ErrorAction SilentlyContinue)) {
+            $defaultBin = "C:\Strawberry\perl\bin"
+            if ((Test-Path (Join-Path $defaultBin 'perl.exe')) -and ((Get-MachinePath) -split ';' -notcontains $defaultBin)) {
+                Add-MachinePathEntry -Dir $defaultBin
+            }
+        }
+        [bool](Get-Command perl.exe -ErrorAction SilentlyContinue) -or (Test-Path "C:\Strawberry\perl\bin\perl.exe")
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 7 - SWIG installed (needed by LLDB's Python scripting bindings)
+# Root cause history: LLDB's build generates Python bindings via SWIG;
+# the official release script notes SWIG 4.1.1 specifically should be used.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "SWIG installed" `
+    -Impact "LLDB's build generates its Python scripting bindings via SWIG. Without swig.exe on PATH, configuring/building the 'lldb' project fails. The official build_llvm_release.bat notes SWIG 4.1.1 specifically should be used for LLDB." `
+    -ManualAction "Install SWIG: 'winget install --id SWIG.SWIG -e' (or download SWIG 4.1.1 from https://www.swig.org/download.html for the exact version the official release script recommends), then ensure swig.exe is on PATH." `
+    -Detect {
+        $swig = (Get-Command swig.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($swig) {
+            return @{ Pass = $true; Detail = "swig.exe found at $swig." }
+        }
+        return @{ Pass = $false; Detail = "swig.exe not found on PATH." }
+    } `
+    -Fix {
+        Write-Host "    Installing SWIG via winget..." -ForegroundColor Yellow
+        winget install --id SWIG.SWIG -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        [bool](Get-Command swig.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 8 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -328,7 +421,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - Bash available (needed by LLVM release build/test steps that
+# CHECK 9 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -369,17 +462,95 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - 7-Zip installed (needed by the release packaging step)
+# CHECK 10 - GNU-style 'mv' and 'tar' utilities available
+# Root cause history: build_llvm_release.bat directly shells out to 'mv'
+# (to rename the extracted source archive) and 'tar' (to unpack the
+# libxml2/zlib/zstd source tarballs it downloads). Neither ships as a
+# built-in cmd.exe command; Windows 10/11 include a bundled bsdtar as
+# tar.exe, but 'mv' has no Windows-native equivalent and is normally
+# provided by Git for Windows' bundled Unix tools (usr\bin).
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "GNU-style 'mv' and 'tar' utilities available" `
+    -Impact "The official release script directly calls 'mv' (to rename the extracted llvm-project source directory) and 'tar' (to unpack downloaded libxml2/zlib/zstd source tarballs). If either is missing from PATH, the build fails immediately during the source-checkout/dependency-download stage." `
+    -ManualAction "Ensure Git for Windows' 'usr\bin' directory (which ships mv.exe, tar.exe, and other Unix tools) is on PATH - install via 'winget install --id Git.Git -e' if needed, then add '<Git install dir>\usr\bin' to PATH. Windows 10 (1803+) / Windows 11 also ship a native tar.exe in System32." `
+    -Detect {
+        $mv = (Get-Command mv.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        $tar = (Get-Command tar.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        $missing = @()
+        if (-not $mv) { $missing += 'mv.exe' }
+        if (-not $tar) { $missing += 'tar.exe' }
+        if ($missing.Count -eq 0) {
+            return @{ Pass = $true; Detail = "mv.exe found at $mv; tar.exe found at $tar." }
+        }
+        return @{ Pass = $false; Detail = "Missing from PATH: $($missing -join ', ')." }
+    } `
+    -Fix {
+        $gitForWindows = Find-GitForWindows
+        if (-not $gitForWindows) {
+            Write-Host "    Installing Git for Windows via winget (provides mv.exe/tar.exe)..." -ForegroundColor Yellow
+            winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+            $gitForWindows = Find-GitForWindows
+        }
+        if (-not $gitForWindows) { return $false }
+        $gitUsrBin = Join-Path (Split-Path (Split-Path $gitForWindows -Parent) -Parent) 'usr\bin'
+        if (Test-Path (Join-Path $gitUsrBin 'mv.exe')) {
+            Add-MachinePathEntry -Dir $gitUsrBin
+            Write-Host "    NOTE: machine PATH updated. If the runner process is already running, it will NOT see this change until it is restarted (known propagation quirk)." -ForegroundColor Yellow
+            $env:Path = "$env:Path;$gitUsrBin"
+            return $true
+        }
+        return $false
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 11 - curl available (used to download the LLVM source archive and
+# libxml2/zlib/zstd dependency tarballs)
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "curl available" `
+    -Impact "The official release script uses 'curl' to download the LLVM source archive (when not using --skip-checkout) and the libxml2/zlib/zstd dependency tarballs. Without curl.exe on PATH, the build fails immediately at the first download step." `
+    -ManualAction "curl.exe ships built-in on Windows 10 (1803+) and Windows 11 at 'C:\Windows\System32\curl.exe'. If missing (e.g. a stripped-down or very old Windows image), install via 'winget install --id cURL.cURL -e'." `
+    -Detect {
+        $curl = (Get-Command curl.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($curl) {
+            return @{ Pass = $true; Detail = "curl.exe found at $curl." }
+        }
+        return @{ Pass = $false; Detail = "curl.exe not found on PATH." }
+    } `
+    -Fix {
+        Write-Host "    Installing curl via winget..." -ForegroundColor Yellow
+        winget install --id cURL.cURL -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        [bool](Get-Command curl.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 12 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
-    -Impact "The final release-packaging step shells out to '7z' to compress the release archive. If missing, the job fails at the very last step, after the entire (multi-hour) build and test run has already completed." `
-    -ManualAction "Install 7-Zip: 'winget install --id 7zip.7zip -e'." `
+    -Impact "The final release-packaging step shells out to '7z' to compress the release archive. If missing, the job fails at the very last step, after the entire (multi-hour) build and test run has already completed. Separately, the official release script also requires 7-Zip 20.x or older UNLESS running elevated, because 7-Zip 21.x+ tries to extract symlinks from LLVM's git archive, which needs administrator rights." `
+    -ManualAction "Install 7-Zip: 'winget install --id 7zip.7zip -e'. If 7-Zip is 21.x or newer and the runner does NOT run elevated, either downgrade to a 20.x release (https://www.7-zip.org/download.html) or run the Actions Runner service as Administrator." `
     -Detect {
-        foreach ($p in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
-            if (Test-Path $p) { return @{ Pass = $true; Detail = "Found at $p" } }
+        $sevenZip = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip\7z.exe" }
+                    elseif (Test-Path "${env:ProgramFiles(x86)}\7-Zip\7z.exe") { "${env:ProgramFiles(x86)}\7-Zip\7z.exe" }
+                    else { $null }
+        if (-not $sevenZip) {
+            return @{ Pass = $false; Detail = "7z.exe not found in either Program Files location." }
         }
-        return @{ Pass = $false; Detail = "7z.exe not found in either Program Files location." }
+        $versionOutput = & $sevenZip 2>$null | Select-Object -First 3
+        if (($versionOutput -join ' ') -match '(\d\d)\.(\d\d)') {
+            $major = [int]$Matches[1]
+            if ($major -ge 21) {
+                $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                if (-not $isAdmin) {
+                    return @{ Pass = $false; Detail = "Found 7-Zip $($Matches[1]).$($Matches[2]) at $sevenZip, but the official release script requires either 7-Zip 20.x or older, or an elevated (Administrator) process, because 21.x+ tries to extract symlinks from LLVM's git archive." }
+                }
+                return @{ Pass = $true; Detail = "Found 7-Zip $($Matches[1]).$($Matches[2]) at $sevenZip; running elevated, so the 21.x+ symlink-extraction restriction does not apply." }
+            }
+        }
+        return @{ Pass = $true; Detail = "Found at $sevenZip" }
     } `
     -Fix {
         Write-Host "    Installing 7-Zip via winget..." -ForegroundColor Yellow
@@ -388,12 +559,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 13 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 9's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 14's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -422,7 +593,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 9 - GitHub Actions Runner process is installed and running
+# CHECK 14 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -443,7 +614,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 8.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 13.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -453,7 +624,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 10 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 15 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
