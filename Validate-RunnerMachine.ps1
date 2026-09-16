@@ -144,6 +144,30 @@ function Find-RunnerDir {
     return $null
 }
 
+function Find-GitForWindows {
+    <#
+        Returns the full path to Git for Windows' git.exe, wherever it's actually
+        installed (any drive letter) - NOT hardcoded to C:. The installer records
+        its real location in the registry regardless of install drive, so that is
+        the authoritative source; a scan of common per-drive locations is used as
+        a fallback for portable/unusual installs that don't write the registry key.
+    #>
+    foreach ($regPath in @('HKLM:\SOFTWARE\GitForWindows', 'HKLM:\SOFTWARE\WOW6432Node\GitForWindows')) {
+        $installPath = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).InstallPath
+        if ($installPath) {
+            $candidate = Join-Path $installPath 'cmd\git.exe'
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    foreach ($drive in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+        foreach ($sub in @('Program Files\Git\cmd\git.exe', 'Program Files (x86)\Git\cmd\git.exe')) {
+            $candidate = Join-Path "$($drive.Root)" $sub
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    return $null
+}
+
 Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) { '(ARM64 - ASan-specific checks below will be skipped)' } else { '(Intel/x64 - ASan-specific checks apply)' })" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
@@ -202,15 +226,15 @@ Invoke-Check -Name "No conflicting newer Visual Studio (e.g. 2026) toolchain pre
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     -Impact "If Git for Windows is missing, or a different git.exe resolves first on PATH, checkout/build steps that shell out to 'git' can fail or behave inconsistently." `
-    -ManualAction "Install Git for Windows ('winget install --id Git.Git -e') and ensure 'C:\Program Files\Git\cmd' appears before any other git installation in the machine PATH." `
+    -ManualAction "Install Git for Windows ('winget install --id Git.Git -e') and ensure its 'cmd' directory appears before any other git installation in the machine PATH." `
     -Detect {
-        $gitForWindows = "C:\Program Files\Git\cmd\git.exe"
-        if (-not (Test-Path $gitForWindows)) {
-            return @{ Pass = $false; Detail = "Git for Windows not found at the expected path: $gitForWindows" }
+        $gitForWindows = Find-GitForWindows
+        if (-not $gitForWindows) {
+            return @{ Pass = $false; Detail = "Git for Windows not found (checked registry install location and common per-drive Program Files paths)." }
         }
         $found = (Get-Command git.exe -All -ErrorAction SilentlyContinue | Select-Object -First 1).Source
         if (-not $found) {
-            return @{ Pass = $false; Detail = "git.exe not resolvable via PATH at all, even though Git for Windows is installed." }
+            return @{ Pass = $false; Detail = "git.exe not resolvable via PATH at all, even though Git for Windows is installed at $gitForWindows." }
         }
         if ($found -ieq $gitForWindows) {
             return @{ Pass = $true; Detail = "git.exe resolves to Git for Windows: $found" }
@@ -218,14 +242,15 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
         return @{ Pass = $false; Detail = "git.exe on PATH resolves to '$found' instead of Git for Windows ($gitForWindows) - PATH ordering issue." }
     } `
     -Fix {
-        $gitForWindows = "C:\Program Files\Git\cmd\git.exe"
-        if (-not (Test-Path $gitForWindows)) {
+        $gitForWindows = Find-GitForWindows
+        if (-not $gitForWindows) {
             Write-Host "    Installing Git for Windows via winget..." -ForegroundColor Yellow
             winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+            $gitForWindows = Find-GitForWindows
         }
-        if (Test-Path $gitForWindows) {
+        if ($gitForWindows) {
             # Move Git's cmd dir to the FRONT of the machine PATH so it wins.
-            $gitDir = "C:\Program Files\Git\cmd"
+            $gitDir = Split-Path $gitForWindows -Parent
             $current = Get-MachinePath
             $parts = ($current -split ';') | Where-Object { $_ -ne '' -and $_ -ne $gitDir }
             $new = (@($gitDir) + $parts) -join ';'
@@ -239,30 +264,37 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
 # CHECK 4 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
-# alongside Git for Windows at C:\Program Files\Git\bin\bash.exe.
+# alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
+# wherever that install actually lives (not hardcoded to C:).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Bash available" `
     -Impact "Some LLVM release build/test steps shell out to 'bash' (e.g. lit-driven test-suite scripts and helper wrappers). If bash.exe cannot be resolved, those steps fail with 'bash is not recognized' partway through a multi-hour build/test run." `
-    -ManualAction "Install Git for Windows ('winget install --id Git.Git -e'), which ships bash.exe at 'C:\Program Files\Git\bin', and ensure that directory is on PATH." `
+    -ManualAction "Install Git for Windows ('winget install --id Git.Git -e'), which ships bash.exe alongside git.exe, and ensure its 'bin' directory is on PATH." `
     -Detect {
         $found = (Get-Command bash.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
         if ($found) {
             return @{ Pass = $true; Detail = "bash.exe resolves via PATH: $found" }
         }
-        $gitBash = "C:\Program Files\Git\bin\bash.exe"
-        if (Test-Path $gitBash) {
-            return @{ Pass = $false; Detail = "bash.exe exists at '$gitBash' (from Git for Windows) but is not on PATH." }
+        $gitForWindows = Find-GitForWindows
+        if ($gitForWindows) {
+            $gitBash = Join-Path (Split-Path (Split-Path $gitForWindows -Parent) -Parent) 'bin\bash.exe'
+            if (Test-Path $gitBash) {
+                return @{ Pass = $false; Detail = "bash.exe exists at '$gitBash' (from Git for Windows) but is not on PATH." }
+            }
         }
-        return @{ Pass = $false; Detail = "bash.exe not found on PATH and not present at the expected Git for Windows location ($gitBash)." }
+        return @{ Pass = $false; Detail = "bash.exe not found on PATH and no Git for Windows 'bin\bash.exe' could be located." }
     } `
     -Fix {
-        $gitBash = "C:\Program Files\Git\bin\bash.exe"
-        if (-not (Test-Path $gitBash)) {
+        $gitForWindows = Find-GitForWindows
+        if (-not $gitForWindows) {
             Write-Host "    Installing Git for Windows via winget (provides bash.exe)..." -ForegroundColor Yellow
             winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+            $gitForWindows = Find-GitForWindows
         }
-        if (Test-Path $gitBash) {
-            Add-MachinePathEntry -Dir "C:\Program Files\Git\bin"
+        if (-not $gitForWindows) { return $false }
+        $gitBinDir = Join-Path (Split-Path (Split-Path $gitForWindows -Parent) -Parent) 'bin'
+        if (Test-Path (Join-Path $gitBinDir 'bash.exe')) {
+            Add-MachinePathEntry -Dir $gitBinDir
             Write-Host "    NOTE: machine PATH updated. If the runner process is already running, it will NOT see this change until it is restarted (known propagation quirk)." -ForegroundColor Yellow
             return $true
         }
