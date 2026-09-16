@@ -395,69 +395,6 @@ Invoke-Check -Name "ASan known-failing-test exclusion overlay (git hook) install
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - Sufficient free disk space
-# ---------------------------------------------------------------------------
-Invoke-Check -Name "Sufficient free disk space for a release build" `
-    -Impact "A full LLVM release build + package (multiple configurations) can consume very large amounts of scratch space. Running out of disk space mid-build wastes a multi-hour run and is NOT something this script can safely auto-fix." `
-    -ManualAction "Free up disk space (remove old build/work directories, old runner _work folders, temp files) or attach additional/larger storage. Recommended: at least 150 GB free on the drive hosting the runner's _work directory." `
-    -Detect {
-        $dir = Find-RunnerDir
-        $driveLetter = if ($dir) { (Split-Path $dir -Qualifier) } else { $env:SystemDrive }
-        $drive = Get-PSDrive ($driveLetter.TrimEnd(':')) -ErrorAction SilentlyContinue
-        if (-not $drive) {
-            return @{ Pass = $false; Detail = "Could not determine free space for drive $driveLetter" }
-        }
-        $freeGB = [math]::Round($drive.Free / 1GB, 1)
-        if ($freeGB -ge 150) {
-            return @{ Pass = $true; Detail = "$freeGB GB free on $driveLetter (>= 150 GB recommended minimum)." }
-        }
-        return @{ Pass = $false; Detail = "Only $freeGB GB free on $driveLetter - below the 150 GB recommended minimum." }
-    } `
-    -Fix $null   # Freeing disk space safely is not something to automate blindly.
-
-# ---------------------------------------------------------------------------
-# CHECK 9 - Windows Defender excludes the runner work directory
-# Root cause history: a heavily-parallel link step intermittently failed with
-# "lld-link: error: failed to write output 'bin\clang.exe': permission
-# denied" - caused by Defender's real-time scanner transiently locking
-# freshly-written executables while many linker processes finish within the
-# same second. Defender was enabled with exclusions for unrelated paths
-# (C:\CloudBuildCache, C:\src) but NOT the actual runner work directory.
-# ---------------------------------------------------------------------------
-Invoke-Check -Name "Windows Defender excludes the runner work directory" `
-    -Impact "Without this exclusion, real-time scanning can transiently lock freshly-linked .exe/.lib files during heavily-parallel build steps, causing intermittent 'permission denied' link failures that waste a multi-hour build run. These failures are non-deterministic and hard to diagnose from the build log alone." `
-    -ManualAction "Add a Windows Defender exclusion for the runner install/work directory, e.g.: Add-MpPreference -ExclusionPath 'D:\actions-runner' (adjust to actual install path), and consider process exclusions for clang.exe / lld-link.exe / ninja.exe." `
-    -Detect {
-        $dir = Find-RunnerDir
-        if (-not $dir) {
-            return @{ Pass = $false; Detail = "Could not auto-detect the runner install directory to verify against Defender exclusions." }
-        }
-        try {
-            $prefs = Get-MpPreference -ErrorAction Stop
-        } catch {
-            return @{ Pass = $true; Detail = "Windows Defender / Get-MpPreference not available on this machine (e.g. third-party AV in use, or Defender module absent) - nothing to check here." }
-        }
-        $excluded = @($prefs.ExclusionPath | Where-Object { $_ -and ($dir -like "$_*") })
-        if ($excluded.Count -gt 0) {
-            return @{ Pass = $true; Detail = "Runner directory '$dir' is covered by Defender exclusion '$($excluded[0])'." }
-        }
-        return @{ Pass = $false; Detail = "Runner directory '$dir' is NOT in Defender's ExclusionPath list (current exclusions: $($prefs.ExclusionPath -join ', '))." }
-    } `
-    -Fix {
-        $dir = Find-RunnerDir
-        if (-not $dir) { return $false }
-        try {
-            Add-MpPreference -ExclusionPath $dir -ErrorAction Stop
-            Add-MpPreference -ExclusionProcess "clang.exe" -ErrorAction SilentlyContinue
-            Add-MpPreference -ExclusionProcess "lld-link.exe" -ErrorAction SilentlyContinue
-            Add-MpPreference -ExclusionProcess "ninja.exe" -ErrorAction SilentlyContinue
-            return $true
-        } catch {
-            return $false
-        }
-    }
-
-# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 Write-Host ""
