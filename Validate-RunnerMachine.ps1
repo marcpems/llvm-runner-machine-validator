@@ -221,7 +221,45 @@ Invoke-Check -Name "No conflicting newer Visual Studio (e.g. 2026) toolchain pre
     -Fix $null   # Deliberately manual-only - see ManualAction above.
 
 # ---------------------------------------------------------------------------
-# CHECK 3 - Git for Windows installed and first on PATH
+# CHECK 3 - CMake installed and meets the minimum version LLVM requires
+# Root cause history: cmake missing (or too old) caused an immediate
+# configure-step failure before any compilation could start.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "CMake installed (minimum version)" `
+    -Impact "LLVM's build is driven by CMake. If cmake.exe is missing, or older than the minimum version LLVM's CMakeLists.txt requires, the configure step fails immediately with 'cmake is not recognized' or a 'CMake x.y or higher is required' error, before any compilation starts." `
+    -ManualAction "Install CMake: 'winget install --id Kitware.CMake -e' (or download from https://cmake.org/download/), then ensure 'cmake.exe' is on PATH (the installer offers to add it automatically - pick 'Add CMake to the system PATH')." `
+    -Detect {
+        $cmake = (Get-Command cmake.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $cmake) {
+            return @{ Pass = $false; Detail = "cmake.exe not found on PATH." }
+        }
+        $versionOutput = & cmake --version 2>$null | Select-Object -First 1
+        if ($versionOutput -notmatch '(\d+)\.(\d+)\.(\d+)') {
+            return @{ Pass = $false; Detail = "Found cmake.exe at $cmake but could not parse its version from '$versionOutput'." }
+        }
+        $found = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        $minimum = [version]"3.20.0"
+        if ($found -ge $minimum) {
+            return @{ Pass = $true; Detail = "cmake $found found at $cmake (>= $minimum minimum required)." }
+        }
+        return @{ Pass = $false; Detail = "cmake $found found at $cmake, but LLVM requires >= $minimum." }
+    } `
+    -Fix {
+        Write-Host "    Installing CMake via winget..." -ForegroundColor Yellow
+        winget install --id Kitware.CMake -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        # winget's PATH change (like the Git for Windows fix elsewhere in this
+        # script) is not visible to the current process; re-resolve via the
+        # machine PATH default install location as a fallback so re-Detect can
+        # see it without requiring a shell restart first.
+        $defaultBin = "${env:ProgramFiles}\CMake\bin"
+        if ((Test-Path (Join-Path $defaultBin 'cmake.exe')) -and ((Get-MachinePath) -split ';' -notcontains $defaultBin)) {
+            Add-MachinePathEntry -Dir $defaultBin
+        }
+        [bool](Get-Command cmake.exe -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $defaultBin 'cmake.exe'))
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 4 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -261,7 +299,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 4 - Bash available (needed by LLVM release build/test steps that
+# CHECK 5 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -302,7 +340,7 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - 7-Zip installed (needed by the release packaging step)
+# CHECK 6 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -321,12 +359,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 7 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 7's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 8's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -355,7 +393,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - GitHub Actions Runner process is installed and running
+# CHECK 8 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -376,7 +414,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 6.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 7.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -386,7 +424,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 9 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.

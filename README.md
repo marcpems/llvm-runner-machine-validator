@@ -34,12 +34,13 @@ run for later reference / auditing.
 |---|-------|----------------------------|
 | 1 | VS2022 Build Tools (C++ workload) installed | Build needs an MSVC toolchain; missing = immediate cmake/MSBuild failure. |
 | 2 | No conflicting newer VS toolchain (e.g. VS2026) present | A VS2026 install on the same machine was picked up ahead of VS2022, silently changing the MSVC ABI/runtime and breaking ASan interceptor tests (`Asan-x86_64-*-Dynamic-Test`, `memset_test.cpp`, `intercept_memcpy.cpp`, `dll_intercept_memcpy_indirect.cpp`). **Intel (x64) only** - auto-passes (skipped) on ARM64, since ASan interceptor tests are not built/run there and this failure mode cannot occur. |
-| 3 | Git for Windows installed and first on PATH | Wrong git.exe / missing Git for Windows broke checkout/build tooling that shells out to `git`. |
-| 4 | Bash available | Some LLVM release build/test steps shell out to `bash` (e.g. lit-driven test-suite scripts and helper wrappers). If `bash.exe` isn't resolvable, those steps fail with `'bash' is not recognized` partway through a multi-hour build/test run. Bash normally ships with Git for Windows at `C:\Program Files\Git\bin\bash.exe`. |
-| 5 | 7-Zip (`7z.exe`) installed | The final release-packaging step failed with `'7z' is not recognized as an internal or external command` **after** a full multi-hour build+test run had already completed. |
-| 6 | 7-Zip directory present on machine-level PATH | `7z.exe` existed but wasn't reachable, same failure as above. **Known quirk:** a machine PATH change is not picked up by an already-running process (including an already-running runner) until it is restarted - the script calls this out explicitly. |
-| 7 | GitHub Actions Runner process running | If the listener isn't running, the machine can't pick up any dispatched job at all. |
-| 8 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. **Intel (x64) only** - auto-passes (skipped) on ARM64, since these ASan tests are not built/run there and the overlay is unnecessary. |
+| 3 | CMake installed (minimum version) | LLVM's configure step is driven by CMake. Missing or too-old `cmake.exe` fails the configure step immediately with `'cmake' is not recognized` or a `CMake x.y or higher is required` error, before any compilation starts. |
+| 4 | Git for Windows installed and first on PATH | Wrong git.exe / missing Git for Windows broke checkout/build tooling that shells out to `git`. |
+| 5 | Bash available | Some LLVM release build/test steps shell out to `bash` (e.g. lit-driven test-suite scripts and helper wrappers). If `bash.exe` isn't resolvable, those steps fail with `'bash' is not recognized` partway through a multi-hour build/test run. Bash normally ships with Git for Windows at `C:\Program Files\Git\bin\bash.exe`. |
+| 6 | 7-Zip (`7z.exe`) installed | The final release-packaging step failed with `'7z' is not recognized as an internal or external command` **after** a full multi-hour build+test run had already completed. |
+| 7 | 7-Zip directory present on machine-level PATH | `7z.exe` existed but wasn't reachable, same failure as above. **Known quirk:** a machine PATH change is not picked up by an already-running process (including an already-running runner) until it is restarted - the script calls this out explicitly. |
+| 8 | GitHub Actions Runner process running | If the listener isn't running, the machine can't pick up any dispatched job at all. |
+| 9 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. **Intel (x64) only** - auto-passes (skipped) on ARM64, since these ASan tests are not built/run there and the overlay is unnecessary. |
 
 ## Design principles
 
@@ -52,7 +53,7 @@ run for later reference / auditing.
   explanation of *why it matters* and *exactly what to do*, never silently skipped.
 * **Detect-only by default.** Nothing changes on the machine unless you pass
   `-ApplyFixes`.
-* **Architecture-aware.** Checks #2 and #8 exist solely to prevent ASan interceptor
+* **Architecture-aware.** Checks #2 and #9 exist solely to prevent ASan interceptor
   test failures, and ASan interceptor tests are only built/run on Intel (x64). The
   script detects ARM64 machines (`$env:PROCESSOR_ARCHITECTURE` /
   `RuntimeInformation.ProcessArchitecture`) and automatically skips (auto-passes)
