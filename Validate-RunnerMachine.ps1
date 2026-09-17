@@ -171,7 +171,8 @@ function Find-GitForWindows {
 Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) { '(ARM64 - ASan-specific checks below will be skipped)' } else { '(Intel/x64 - ASan-specific checks apply)' })" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
-# CHECK 1 - Chocolatey package manager installed
+# CHECK 1 - Chocolatey package manager installed AND configured for
+# non-interactive (CI) use.
 # Root cause history: this validator's own auto-fixes (and the machine setup
 # steps documented for build_llvm_release.bat's prerequisites) rely on winget
 # for most tools, but several LLVM build prerequisites - the GNUWin32 utilities
@@ -180,41 +181,99 @@ Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) {
 # Chocolatey is the standard package manager these are actually installed
 # from on Windows CI/build machines (including self-hosted runners on Windows
 # Server SKUs, which do not ship winget/App Installer out of the box). If
-# choco.exe is missing, none of those installs can be automated here.
+# choco.exe is missing, none of those installs can be automated here. Also,
+# by default Chocolatey prompts "Do you want to run the script? ([Y]es/[A]ll/
+# [N]o/[P]rint)" before every install - on a non-interactive CI runner this
+# can't be answered, and choco eventually aborts with "Too many bad attempts.
+# Stopping before application crash." The 'allowGlobalConfirmation' feature
+# must be enabled once to make 'choco install' behave like '-y' by default.
 # ---------------------------------------------------------------------------
-Invoke-Check -Name "Chocolatey (choco.exe) package manager installed" `
-    -Impact "winget is not present by default on many Windows Server-based self-hosted runner images, and some LLVM build prerequisites (GNUWin32 patch/diff, Subversion, NSIS for the installer packaging step) are not published on winget at all. Chocolatey is the standard fallback package manager for installing these, and without it those tools must be installed manually." `
-    -ManualAction "Install Chocolatey from an elevated (Administrator) PowerShell prompt: `"Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))`". See https://chocolatey.org/install for details." `
+Invoke-Check -Name "Chocolatey installed and configured for non-interactive (CI) use" `
+    -Impact "winget is not present by default on many Windows Server-based self-hosted runner images, and some LLVM build prerequisites (GNUWin32 patch/diff, Subversion, NSIS for the installer packaging step) are not published on winget at all - Chocolatey is the standard fallback package manager for these. Separately, without the 'allowGlobalConfirmation' feature enabled, every 'choco install' hits an interactive '[Y]es/[A]ll/[N]o/[P]rint' confirmation prompt that a non-interactive CI runner can never answer, so the install eventually fails with 'Too many bad attempts. Stopping before application crash.' even though choco.exe itself is present." `
+    -ManualAction "From an elevated (Administrator) PowerShell prompt: `"Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')); choco feature enable -n=allowGlobalConfirmation`". See https://chocolatey.org/install for details." `
     -Detect {
         $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
-        if (-not $choco) {
-            $fallback = "$env:ProgramData\chocolatey\bin\choco.exe"
-            if (Test-Path $fallback) {
-                return @{ Pass = $true; Detail = "choco.exe found at $fallback (not yet on the current process' PATH - a new shell/session should pick it up)." }
-            }
+        $chocoPath = if ($choco) { $choco.Source } elseif (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe") { "$env:ProgramData\chocolatey\bin\choco.exe" } else { $null }
+        if (-not $chocoPath) {
             return @{ Pass = $false; Detail = "choco.exe not found on PATH or at the default install location ($env:ProgramData\chocolatey\bin\choco.exe)." }
         }
-        $version = (& $choco.Source --version 2>$null | Select-Object -First 1)
-        return @{ Pass = $true; Detail = "choco.exe found at $($choco.Source), version $version." }
+        $configPath = "$env:ProgramData\chocolatey\config\chocolatey.config"
+        if (-not (Test-Path $configPath)) {
+            return @{ Pass = $false; Detail = "choco.exe found at $chocoPath, but its config file was not found at $configPath, so its 'allowGlobalConfirmation' setting can't be verified." }
+        }
+        [xml]$cfg = Get-Content $configPath
+        $feature = $cfg.chocolatey.features.feature | Where-Object { $_.name -eq 'allowGlobalConfirmation' }
+        if (-not $feature -or $feature.enabled -ne 'true') {
+            return @{ Pass = $false; Detail = "choco.exe found at $chocoPath, but the 'allowGlobalConfirmation' feature is NOT enabled - any 'choco install' will hang on the interactive '[Y]es/[A]ll/[N]o/[P]rint' prompt and eventually fail with 'Too many bad attempts. Stopping before application crash.' on a non-interactive runner." }
+        }
+        $version = (& $chocoPath --version 2>$null | Select-Object -First 1)
+        return @{ Pass = $true; Detail = "choco.exe found at $chocoPath, version $version, 'allowGlobalConfirmation' is enabled (non-interactive installs will work)." }
     } `
     -Fix {
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        if (-not $isAdmin) {
-            Write-Host "    Skipping automatic install: the official Chocolatey bootstrap requires an elevated (Administrator) process, and this process is not elevated." -ForegroundColor Yellow
-            return $false
+        $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+        $chocoPath = if ($choco) { $choco.Source } elseif (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe") { "$env:ProgramData\chocolatey\bin\choco.exe" } else { $null }
+
+        if (-not $chocoPath) {
+            if (-not $isAdmin) {
+                Write-Host "    Skipping automatic install: the official Chocolatey bootstrap requires an elevated (Administrator) process, and this process is not elevated." -ForegroundColor Yellow
+                return $false
+            }
+            Write-Host "    Installing Chocolatey via the official bootstrap script..." -ForegroundColor Yellow
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $env:Path = @($machinePath, $userPath) -join ';'
+            $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+            $chocoPath = if ($choco) { $choco.Source } elseif (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe") { "$env:ProgramData\chocolatey\bin\choco.exe" } else { $null }
+            if (-not $chocoPath) { return $false }
         }
-        Write-Host "    Installing Chocolatey via the official bootstrap script..." -ForegroundColor Yellow
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $env:Path = @($machinePath, $userPath) -join ';'
-        (Get-Command choco.exe -ErrorAction SilentlyContinue) -or (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe")
+
+        Write-Host "    Enabling Chocolatey's 'allowGlobalConfirmation' feature (so 'choco install' runs non-interactively, without the [Y]es/[A]ll/[N]o/[P]rint prompt)..." -ForegroundColor Yellow
+        & $chocoPath feature enable -n=allowGlobalConfirmation --limit-output | Out-Null
+        $true
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 2 - VS2022 Build Tools with C++ workload present, matching the HOST
+# CHECK 2 - No stale Chocolatey pending-install lock files
+# Root cause history: a previously interrupted/aborted 'choco install' left a
+# '.chocolateyPending' marker file in the affected package's lib folder (e.g.
+# 'lib\wixtoolset\.chocolateyPending'). Chocolatey refuses to run ANY further
+# install/upgrade while ANY such marker exists anywhere under its lib/lib-bad
+# folders, failing with errors like "The process cannot access the file
+# '...\.chocolateyPending' because it is being used by another process" - so
+# one earlier aborted install can permanently block every subsequent
+# choco-based auto-fix in this validator until the stale marker is cleared.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "No stale Chocolatey pending-install lock files" `
+    -Impact "A '.chocolateyPending' marker left behind by a previously interrupted 'choco install' blocks EVERY subsequent 'choco install'/'choco upgrade' call (not just the originally-affected package) with an error like 'the process cannot access the file ... because it is being used by another process', silently breaking every other check in this script whose auto-fix relies on Chocolatey." `
+    -ManualAction "Make sure no choco.exe process is actually still running, then delete any '.chocolateyPending' files found under 'C:\ProgramData\chocolatey\lib\*' and 'C:\ProgramData\chocolatey\lib-bad\*', and re-run the originally-interrupted 'choco install' manually." `
+    -Detect {
+        $libRoots = @("$env:ProgramData\chocolatey\lib", "$env:ProgramData\chocolatey\lib-bad") | Where-Object { Test-Path $_ }
+        $pending = @($libRoots | ForEach-Object { Get-ChildItem -Path $_ -Filter '.chocolateyPending' -Recurse -Force -ErrorAction SilentlyContinue })
+        if ($pending.Count -eq 0) {
+            return @{ Pass = $true; Detail = "No stale '.chocolateyPending' marker files found." }
+        }
+        return @{ Pass = $false; Detail = "Found $($pending.Count) stale '.chocolateyPending' marker file(s) from a previously interrupted install, blocking all further choco installs: $(($pending | ForEach-Object { $_.FullName }) -join ', ')" }
+    } `
+    -Fix {
+        $libRoots = @("$env:ProgramData\chocolatey\lib", "$env:ProgramData\chocolatey\lib-bad") | Where-Object { Test-Path $_ }
+        $pending = @($libRoots | ForEach-Object { Get-ChildItem -Path $_ -Filter '.chocolateyPending' -Recurse -Force -ErrorAction SilentlyContinue })
+        foreach ($p in $pending) {
+            try {
+                Remove-Item -Path $p.FullName -Force -ErrorAction Stop
+                Write-Host "    Removed stale lock: $($p.FullName)" -ForegroundColor Yellow
+            } catch {
+                Write-Host "    Could not remove $($p.FullName): $($_.Exception.Message) - a process may still be holding it open." -ForegroundColor Red
+            }
+        }
+        $true
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 3 - VS2022 Build Tools with C++ workload present, matching the HOST
 # CPU architecture. Root cause history: builds require MSVC toolchain from
 # VS2022 specifically; ASan interceptor tests were observed to fail under a
 # different VS toolset. On ARM64 runners specifically, requiring only the
@@ -263,7 +322,7 @@ Invoke-Check -Name "VS2022 Build Tools (C++ workload, $(if ($isArm64) { 'ARM64' 
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 3 - No newer/conflicting VS toolchain (e.g. VS2026) shadowing VS2022
+# CHECK 4 - No newer/conflicting VS toolchain (e.g. VS2026) shadowing VS2022
 # Root cause history: a VS2026 install on the same machine got picked up ahead
 # of VS2022, breaking ASan interceptors during lit tests.
 # ---------------------------------------------------------------------------
@@ -291,7 +350,7 @@ Invoke-Check -Name "No conflicting newer Visual Studio (e.g. 2026) toolchain pre
     -Fix $null   # Deliberately manual-only - see ManualAction above.
 
 # ---------------------------------------------------------------------------
-# CHECK 4 - CMake installed and meets the minimum version LLVM requires
+# CHECK 5 - CMake installed and meets the minimum version LLVM requires
 # Root cause history: cmake missing (or too old) caused an immediate
 # configure-step failure before any compilation could start.
 # ---------------------------------------------------------------------------
@@ -329,7 +388,7 @@ Invoke-Check -Name "CMake installed (minimum version)" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - Ninja installed (build generator used by the LLVM release build)
+# CHECK 6 - Ninja installed (build generator used by the LLVM release build)
 # Root cause history: ninja missing caused an immediate CMake configure
 # failure ("CMake Error: CMAKE_GENERATOR was set but the generator
 # 'Ninja' is not installed") before any compilation could start.
@@ -358,7 +417,7 @@ Invoke-Check -Name "Ninja installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - clang-cl (recent LLVM release) available for accelerated stage0
+# CHECK 7 - clang-cl (recent LLVM release) available for accelerated stage0
 # Root cause history: the official release script auto-detects clang-cl and
 # lld-link on PATH and, if both work, uses them (with -fuse-ld=lld) to build
 # the stage0 bootstrap compiler INSTEAD of plain MSVC - this is significantly
@@ -406,7 +465,7 @@ Invoke-Check -Name "clang-cl (recent LLVM release) available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - Python 3 installed (LLDB build + CMake Python3 detection)
+# CHECK 8 - Python 3 installed (LLDB build + CMake Python3 detection)
 # Root cause history: the official release script hardcodes an expected
 # Python 3.11 install location (unless --local-python is passed, in which
 # case it resolves 'where python.exe'); a missing/unusable Python breaks
@@ -445,7 +504,7 @@ Invoke-Check -Name "Python 3 installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - Perl installed (needed by the OpenMP runtime's build)
+# CHECK 9 - Perl installed (needed by the OpenMP runtime's build)
 # Root cause history: OpenMP's build system shells out to 'perl' for its
 # source/config generation steps; without it, runtimes configuration fails.
 # ---------------------------------------------------------------------------
@@ -475,7 +534,7 @@ Invoke-Check -Name "Perl installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 9 - SWIG installed (needed by LLDB's Python scripting bindings)
+# CHECK 10 - SWIG installed (needed by LLDB's Python scripting bindings)
 # Root cause history: LLDB's build generates Python bindings via SWIG;
 # the official release script notes SWIG 4.1.1 specifically should be used.
 # ---------------------------------------------------------------------------
@@ -499,7 +558,7 @@ Invoke-Check -Name "SWIG installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 10 - Git for Windows installed and first on PATH
+# CHECK 11 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -539,7 +598,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 11 - Bash available (needed by LLVM release build/test steps that
+# CHECK 12 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -580,7 +639,7 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 12 - GNU-style 'mv' and 'tar' utilities available
+# CHECK 13 - GNU-style 'mv' and 'tar' utilities available
 # Root cause history: build_llvm_release.bat directly shells out to 'mv'
 # (to rename the extracted source archive) and 'tar' (to unpack the
 # libxml2/zlib/zstd source tarballs it downloads). Neither ships as a
@@ -621,7 +680,7 @@ Invoke-Check -Name "GNU-style 'mv' and 'tar' utilities available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 13 - curl available (used to download the LLVM source archive and
+# CHECK 14 - curl available (used to download the LLVM source archive and
 # libxml2/zlib/zstd dependency tarballs)
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "curl available" `
@@ -644,7 +703,7 @@ Invoke-Check -Name "curl available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 14 - 7-Zip installed (needed by the release packaging step)
+# CHECK 15 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -677,12 +736,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 15 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 16 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 16's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 17's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -711,7 +770,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 16 - GitHub Actions Runner process is installed and running
+# CHECK 17 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -732,7 +791,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 15.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 16.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -742,7 +801,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 17 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 18 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
