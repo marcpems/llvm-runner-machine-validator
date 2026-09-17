@@ -897,6 +897,11 @@ Invoke-Check -Name "Windows power plan set to High performance" `
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
+# Also fixes a real bug: this check's hook directory used to be hardcoded to
+# 'D:\git-hooks-global', which crashed the ENTIRE script (a top-level,
+# uncaught "Cannot find drive 'D'" error) on any machine without a D: drive -
+# not a graceful failure of just this one check. Now uses a ProgramData-based
+# path, which always exists regardless of drive layout.
 # ---------------------------------------------------------------------------
 $knownExclusions = @(
     'memset_test.cpp',
@@ -905,7 +910,13 @@ $knownExclusions = @(
     'Asan-x86_64-calls-Dynamic-Test',
     'Asan-x86_64-inline-Dynamic-Test'
 )
-$hookDir  = 'D:\git-hooks-global'
+# NOTE: previously hardcoded to 'D:\git-hooks-global', which made this whole
+# script CRASH (a top-level, un-caught "Cannot find drive" error from
+# Join-Path) on any machine without a D: drive - not just fail this one
+# check, but abort every check listed after it too. Using ProgramData avoids
+# assuming any particular drive layout, since it's guaranteed to exist on
+# the system/boot drive on every Windows installation.
+$hookDir  = Join-Path $env:ProgramData 'llvm-runner-validator\git-hooks-global'
 $hookFile = Join-Path $hookDir 'post-checkout'
 $hookBody = @'
 #!/bin/sh
