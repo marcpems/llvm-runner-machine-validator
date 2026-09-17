@@ -741,7 +741,7 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 17's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 18's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -770,7 +770,65 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 17 - GitHub Actions Runner process is installed and running
+# CHECK 17 - WiX Toolset v3 (candle.exe/light.exe) installed and on PATH
+# Root cause history: the release packaging step's final CPack invocation
+# uses CMake's CPackWIX generator to build the .msi installer, which shells
+# out directly to WiX v3's 'candle.exe' and 'light.exe'. Observed failure:
+# "CMake Error ... CPackWIX.cmake:22 (message): Could not find the WiX
+# candle executable." / "CPack Error: Fatal WiX Generator Error" - this
+# happens AFTER the entire multi-hour build has already completed, at the
+# very last packaging step, wasting the whole run. Note WiX v4+ (installed
+# via 'dotnet tool install wix') does NOT provide candle.exe/light.exe at
+# all (replaced by a single 'wix build' command) - CMake's CPackWIX module
+# specifically needs the classic WiX v3 toolset, so that is what is checked
+# for and installed here. WiX v3 is not published on winget, so this uses
+# Chocolatey (see Check 1/2) via the 'wixtoolset' package.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "WiX Toolset v3 (candle.exe/light.exe) installed and on PATH" `
+    -Impact "The release packaging step's CPack invocation uses CMake's CPackWIX generator to build the .msi installer, which directly shells out to WiX v3's candle.exe/light.exe. If either is missing, packaging fails with 'Could not find the WiX candle executable' / 'CPack Error: Fatal WiX Generator Error' - AFTER the entire multi-hour build has already completed, wasting the whole run. WiX v4+ does not provide candle.exe/light.exe (replaced by 'wix build'), so a newer WiX install does not satisfy this." `
+    -ManualAction "Install WiX Toolset v3 via Chocolatey (not available on winget): 'choco install wixtoolset -y', then ensure its bin directory (e.g. 'C:\Program Files (x86)\WiX Toolset v3.14\bin') is on the machine PATH." `
+    -Detect {
+        $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+        $light = Get-Command light.exe -ErrorAction SilentlyContinue
+        if ($candle -and $light) {
+            return @{ Pass = $true; Detail = "candle.exe found at $($candle.Source); light.exe found at $($light.Source)." }
+        }
+        $wixDir = Get-ChildItem -Path "${env:ProgramFiles(x86)}" -Directory -Filter 'WiX Toolset v3*' -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending | Select-Object -First 1
+        if ($wixDir) {
+            $candleOnDisk = Join-Path $wixDir.FullName 'bin\candle.exe'
+            $lightOnDisk = Join-Path $wixDir.FullName 'bin\light.exe'
+            if ((Test-Path $candleOnDisk) -and (Test-Path $lightOnDisk)) {
+                return @{ Pass = $false; Detail = "WiX Toolset v3 is installed at $($wixDir.FullName), but its 'bin' directory is not on PATH, so CPack's WIX generator still can't find candle.exe/light.exe." }
+            }
+        }
+        return @{ Pass = $false; Detail = "candle.exe/light.exe not found on PATH or under any '${env:ProgramFiles(x86)}\WiX Toolset v3*' install." }
+    } `
+    -Fix {
+        $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+        $chocoPath = if ($choco) { $choco.Source } elseif (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe") { "$env:ProgramData\chocolatey\bin\choco.exe" } else { $null }
+        if (-not $chocoPath) {
+            Write-Host "    Cannot install WiX Toolset: Chocolatey is not installed (see 'Chocolatey installed...' check above)." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "    Installing WiX Toolset v3 via Chocolatey..." -ForegroundColor Yellow
+        & $chocoPath install wixtoolset -y --no-progress | Out-Null
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            $wixDir = Get-ChildItem -Path "${env:ProgramFiles(x86)}" -Directory -Filter 'WiX Toolset v3*' -ErrorAction SilentlyContinue |
+                      Sort-Object Name -Descending | Select-Object -First 1
+            if ($wixDir -and (Test-Path (Join-Path $wixDir.FullName 'bin\candle.exe'))) {
+                Add-MachinePathEntry -Dir (Join-Path $wixDir.FullName 'bin')
+                $env:Path = "$env:Path;$(Join-Path $wixDir.FullName 'bin')"
+            }
+        }
+        [bool](Get-Command candle.exe -ErrorAction SilentlyContinue)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 18 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -801,7 +859,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 18 - Windows power plan set to "High performance" (best performance)
+# CHECK 19 - Windows power plan set to "High performance" (best performance)
 # Root cause history: Windows' default "Balanced" power plan aggressively
 # throttles CPU clocks/parks cores to save power, which can significantly
 # slow down a multi-hour LLVM build/test run and introduce run-to-run timing
@@ -835,7 +893,7 @@ Invoke-Check -Name "Windows power plan set to High performance" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 19 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 20 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
