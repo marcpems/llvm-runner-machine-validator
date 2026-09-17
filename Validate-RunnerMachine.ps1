@@ -801,7 +801,41 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 18 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 18 - Windows power plan set to "High performance" (best performance)
+# Root cause history: Windows' default "Balanced" power plan aggressively
+# throttles CPU clocks/parks cores to save power, which can significantly
+# slow down a multi-hour LLVM build/test run and introduce run-to-run timing
+# variance. This is especially relevant on laptops and some Windows Server
+# images where "Balanced" (or even "Power saver") is the out-of-the-box
+# default. The "High performance" plan is a built-in Windows scheme (present
+# by GUID even when hidden from the Power Options UI), so it can always be
+# activated directly without needing to unhide/duplicate it first.
+# ---------------------------------------------------------------------------
+$highPerfGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$ultimatePerfGuid = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+Invoke-Check -Name "Windows power plan set to High performance" `
+    -Impact "The default 'Balanced' (or 'Power saver') power plan throttles CPU clock speed and parks cores to save power, which can noticeably slow down a multi-hour LLVM build/test run and add run-to-run timing variance. 'High performance' (or 'Ultimate Performance') keeps the CPU running at full speed throughout the build." `
+    -ManualAction "From an elevated PowerShell prompt: 'powercfg /setactive $highPerfGuid' (this works even if 'High performance' isn't visible in Settings > Power Options, since it's a built-in scheme identified by a fixed GUID)." `
+    -Detect {
+        $activeLine = (powercfg /getactivescheme 2>$null)
+        if ($activeLine -match '([0-9a-fA-F-]{36})') {
+            $activeGuid = $Matches[1].ToLowerInvariant()
+            if ($activeGuid -eq $highPerfGuid -or $activeGuid -eq $ultimatePerfGuid) {
+                return @{ Pass = $true; Detail = "Active power plan: $activeLine" }
+            }
+            return @{ Pass = $false; Detail = "Active power plan is NOT High performance / Ultimate Performance: $activeLine" }
+        }
+        return @{ Pass = $false; Detail = "Could not determine the active power scheme - 'powercfg /getactivescheme' returned unexpected output." }
+    } `
+    -Fix {
+        Write-Host "    Activating the 'High performance' power plan..." -ForegroundColor Yellow
+        powercfg /setactive $highPerfGuid | Out-Null
+        $activeLine = (powercfg /getactivescheme 2>$null)
+        $activeLine -match [regex]::Escape($highPerfGuid)
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 19 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.

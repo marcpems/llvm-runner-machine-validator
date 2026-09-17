@@ -52,7 +52,8 @@ run for later reference / auditing.
 | 15 | 7-Zip (`7z.exe`) installed (correct version) | The final release-packaging step failed with `'7z' is not recognized as an internal or external command` **after** a full multi-hour build+test run had already completed. Also enforces the official script's requirement that 7-Zip be 20.x or older UNLESS the process is elevated, since 7-Zip 21.x+ tries to extract symlinks from LLVM's git archive (which needs Administrator rights). |
 | 16 | 7-Zip directory present on machine-level PATH | `7z.exe` existed but wasn't reachable, same failure as above. **Known quirk:** a machine PATH change is not picked up by an already-running process (including an already-running runner) until it is restarted - the script calls this out explicitly. |
 | 17 | GitHub Actions Runner process running | If the listener isn't running, the machine can't pick up any dispatched job at all. |
-| 18 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. **Intel (x64) only** - auto-passes (skipped) on ARM64, since these ASan tests are not built/run there and the overlay is unnecessary. |
+| 18 | Windows power plan set to High performance | The default "Balanced" (or "Power saver") plan throttles CPU clock speed and parks cores to save power, which can noticeably slow down a multi-hour LLVM build/test run and add run-to-run timing variance. Auto-fix activates the built-in "High performance" scheme directly by its well-known GUID (works even when the plan is hidden from the Power Options UI, without needing to unhide/duplicate it first). |
+| 19 | ASan known-failing-test exclusion overlay (git hook) installed | 5 specific ASan interceptor tests are known-failing in this environment (not real code regressions). A machine-local, never-committed `post-checkout` git hook appends them to `LIT_FILTER_OUT` in `build_llvm_release.bat` after every checkout, since that script hard-overwrites the variable with a literal string. This is a transient, per-machine overlay - it never touches the repo/branch. **Intel (x64) only** - auto-passes (skipped) on ARM64, since these ASan tests are not built/run there and the overlay is unnecessary. |
 
 ## Design principles
 
@@ -65,7 +66,7 @@ run for later reference / auditing.
   explanation of *why it matters* and *exactly what to do*, never silently skipped.
 * **Detect-only by default.** Nothing changes on the machine unless you pass
   `-ApplyFixes`.
-* **Architecture-aware.** Checks #4 and #18 exist solely to prevent ASan interceptor
+* **Architecture-aware.** Checks #4 and #19 exist solely to prevent ASan interceptor
   test failures, and ASan interceptor tests are only built/run on Intel (x64). The
   script detects ARM64 machines (`$env:PROCESSOR_ARCHITECTURE` /
   `RuntimeInformation.ProcessArchitecture`) and automatically skips (auto-passes)
