@@ -171,7 +171,50 @@ function Find-GitForWindows {
 Write-Host "Detected architecture: $env:PROCESSOR_ARCHITECTURE $(if ($isArm64) { '(ARM64 - ASan-specific checks below will be skipped)' } else { '(Intel/x64 - ASan-specific checks apply)' })" -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
-# CHECK 1 - VS2022 Build Tools with C++ workload present, matching the HOST
+# CHECK 1 - Chocolatey package manager installed
+# Root cause history: this validator's own auto-fixes (and the machine setup
+# steps documented for build_llvm_release.bat's prerequisites) rely on winget
+# for most tools, but several LLVM build prerequisites - the GNUWin32 utilities
+# (patch.exe/diff.exe), Subversion, and NSIS (used for building the Windows
+# installer package) - are not published on the public winget registry at all.
+# Chocolatey is the standard package manager these are actually installed
+# from on Windows CI/build machines (including self-hosted runners on Windows
+# Server SKUs, which do not ship winget/App Installer out of the box). If
+# choco.exe is missing, none of those installs can be automated here.
+# ---------------------------------------------------------------------------
+Invoke-Check -Name "Chocolatey (choco.exe) package manager installed" `
+    -Impact "winget is not present by default on many Windows Server-based self-hosted runner images, and some LLVM build prerequisites (GNUWin32 patch/diff, Subversion, NSIS for the installer packaging step) are not published on winget at all. Chocolatey is the standard fallback package manager for installing these, and without it those tools must be installed manually." `
+    -ManualAction "Install Chocolatey from an elevated (Administrator) PowerShell prompt: `"Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))`". See https://chocolatey.org/install for details." `
+    -Detect {
+        $choco = Get-Command choco.exe -ErrorAction SilentlyContinue
+        if (-not $choco) {
+            $fallback = "$env:ProgramData\chocolatey\bin\choco.exe"
+            if (Test-Path $fallback) {
+                return @{ Pass = $true; Detail = "choco.exe found at $fallback (not yet on the current process' PATH - a new shell/session should pick it up)." }
+            }
+            return @{ Pass = $false; Detail = "choco.exe not found on PATH or at the default install location ($env:ProgramData\chocolatey\bin\choco.exe)." }
+        }
+        $version = (& $choco.Source --version 2>$null | Select-Object -First 1)
+        return @{ Pass = $true; Detail = "choco.exe found at $($choco.Source), version $version." }
+    } `
+    -Fix {
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Write-Host "    Skipping automatic install: the official Chocolatey bootstrap requires an elevated (Administrator) process, and this process is not elevated." -ForegroundColor Yellow
+            return $false
+        }
+        Write-Host "    Installing Chocolatey via the official bootstrap script..." -ForegroundColor Yellow
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = @($machinePath, $userPath) -join ';'
+        (Get-Command choco.exe -ErrorAction SilentlyContinue) -or (Test-Path "$env:ProgramData\chocolatey\bin\choco.exe")
+    }
+
+# ---------------------------------------------------------------------------
+# CHECK 2 - VS2022 Build Tools with C++ workload present, matching the HOST
 # CPU architecture. Root cause history: builds require MSVC toolchain from
 # VS2022 specifically; ASan interceptor tests were observed to fail under a
 # different VS toolset. On ARM64 runners specifically, requiring only the
@@ -220,7 +263,7 @@ Invoke-Check -Name "VS2022 Build Tools (C++ workload, $(if ($isArm64) { 'ARM64' 
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 2 - No newer/conflicting VS toolchain (e.g. VS2026) shadowing VS2022
+# CHECK 3 - No newer/conflicting VS toolchain (e.g. VS2026) shadowing VS2022
 # Root cause history: a VS2026 install on the same machine got picked up ahead
 # of VS2022, breaking ASan interceptors during lit tests.
 # ---------------------------------------------------------------------------
@@ -248,7 +291,7 @@ Invoke-Check -Name "No conflicting newer Visual Studio (e.g. 2026) toolchain pre
     -Fix $null   # Deliberately manual-only - see ManualAction above.
 
 # ---------------------------------------------------------------------------
-# CHECK 3 - CMake installed and meets the minimum version LLVM requires
+# CHECK 4 - CMake installed and meets the minimum version LLVM requires
 # Root cause history: cmake missing (or too old) caused an immediate
 # configure-step failure before any compilation could start.
 # ---------------------------------------------------------------------------
@@ -286,7 +329,7 @@ Invoke-Check -Name "CMake installed (minimum version)" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 4 - Ninja installed (build generator used by the LLVM release build)
+# CHECK 5 - Ninja installed (build generator used by the LLVM release build)
 # Root cause history: ninja missing caused an immediate CMake configure
 # failure ("CMake Error: CMAKE_GENERATOR was set but the generator
 # 'Ninja' is not installed") before any compilation could start.
@@ -315,7 +358,7 @@ Invoke-Check -Name "Ninja installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 5 - clang-cl (recent LLVM release) available for accelerated stage0
+# CHECK 6 - clang-cl (recent LLVM release) available for accelerated stage0
 # Root cause history: the official release script auto-detects clang-cl and
 # lld-link on PATH and, if both work, uses them (with -fuse-ld=lld) to build
 # the stage0 bootstrap compiler INSTEAD of plain MSVC - this is significantly
@@ -363,7 +406,7 @@ Invoke-Check -Name "clang-cl (recent LLVM release) available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 6 - Python 3 installed (LLDB build + CMake Python3 detection)
+# CHECK 7 - Python 3 installed (LLDB build + CMake Python3 detection)
 # Root cause history: the official release script hardcodes an expected
 # Python 3.11 install location (unless --local-python is passed, in which
 # case it resolves 'where python.exe'); a missing/unusable Python breaks
@@ -402,7 +445,7 @@ Invoke-Check -Name "Python 3 installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 7 - Perl installed (needed by the OpenMP runtime's build)
+# CHECK 8 - Perl installed (needed by the OpenMP runtime's build)
 # Root cause history: OpenMP's build system shells out to 'perl' for its
 # source/config generation steps; without it, runtimes configuration fails.
 # ---------------------------------------------------------------------------
@@ -432,7 +475,7 @@ Invoke-Check -Name "Perl installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 8 - SWIG installed (needed by LLDB's Python scripting bindings)
+# CHECK 9 - SWIG installed (needed by LLDB's Python scripting bindings)
 # Root cause history: LLDB's build generates Python bindings via SWIG;
 # the official release script notes SWIG 4.1.1 specifically should be used.
 # ---------------------------------------------------------------------------
@@ -456,7 +499,7 @@ Invoke-Check -Name "SWIG installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 9 - Git for Windows installed and first on PATH
+# CHECK 10 - Git for Windows installed and first on PATH
 # Root cause history: wrong/absent git on PATH broke checkout/build tooling.
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
@@ -496,7 +539,7 @@ Invoke-Check -Name "Git for Windows installed and correctly ordered on PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 10 - Bash available (needed by LLVM release build/test steps that
+# CHECK 11 - Bash available (needed by LLVM release build/test steps that
 # shell out to bash, e.g. lit test-suite helper scripts and symbolizer
 # wrappers invoked from the Windows release build). Bash normally ships
 # alongside Git for Windows, in a 'bin' folder next to its 'cmd' folder -
@@ -537,7 +580,7 @@ Invoke-Check -Name "Bash available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 11 - GNU-style 'mv' and 'tar' utilities available
+# CHECK 12 - GNU-style 'mv' and 'tar' utilities available
 # Root cause history: build_llvm_release.bat directly shells out to 'mv'
 # (to rename the extracted source archive) and 'tar' (to unpack the
 # libxml2/zlib/zstd source tarballs it downloads). Neither ships as a
@@ -578,7 +621,7 @@ Invoke-Check -Name "GNU-style 'mv' and 'tar' utilities available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 12 - curl available (used to download the LLVM source archive and
+# CHECK 13 - curl available (used to download the LLVM source archive and
 # libxml2/zlib/zstd dependency tarballs)
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "curl available" `
@@ -601,7 +644,7 @@ Invoke-Check -Name "curl available" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 13 - 7-Zip installed (needed by the release packaging step)
+# CHECK 14 - 7-Zip installed (needed by the release packaging step)
 # Root cause history: packaging step failed with "'7z' is not recognized".
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip (7z.exe) installed" `
@@ -634,12 +677,12 @@ Invoke-Check -Name "7-Zip (7z.exe) installed" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 14 - 7-Zip directory present on the MACHINE-level PATH
+# CHECK 15 - 7-Zip directory present on the MACHINE-level PATH
 # Root cause history: 7z.exe existed but its folder wasn't on PATH, so the
 # packaging step still failed to invoke it. NOTE: this environment showed a
 # quirk where an already-running process (and even some "fresh" ones) does
 # NOT pick up a machine PATH change until the process tree is relaunched -
-# so after fixing this, a RUNNER RESTART is required (see Check 15's fix).
+# so after fixing this, a RUNNER RESTART is required (see Check 16's fix).
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     -Impact "Even with 7z.exe installed, if its folder isn't on PATH, 'the system cannot find 7z' errors persist. A machine PATH change alone is NOT enough - already-running processes (including an already-running runner) will not see it until restarted." `
@@ -668,7 +711,7 @@ Invoke-Check -Name "7-Zip directory present in machine-level PATH" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 15 - GitHub Actions Runner process is installed and running
+# CHECK 16 - GitHub Actions Runner process is installed and running
 # ---------------------------------------------------------------------------
 Invoke-Check -Name "GitHub Actions Runner is running" `
     -Impact "If the runner listener isn't running, this machine cannot pick up any jobs at all - dispatched runs will queue and eventually time out waiting for an available runner." `
@@ -689,7 +732,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
             return $false
         }
         # Relaunch with 7-Zip's folder explicitly prefixed onto PATH for this process
-        # tree, to sidestep the machine-PATH propagation quirk noted in Check 14.
+        # tree, to sidestep the machine-PATH propagation quirk noted in Check 15.
         $sevenZipDir = if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") { "$env:ProgramFiles\7-Zip" } else { $null }
         $prefix = if ($sevenZipDir) { "set PATH=%PATH%;$sevenZipDir && " } else { "" }
         Write-Host "    Launching runner from $dir ..." -ForegroundColor Yellow
@@ -699,7 +742,7 @@ Invoke-Check -Name "GitHub Actions Runner is running" `
     }
 
 # ---------------------------------------------------------------------------
-# CHECK 16 - ASan known-failing-test exclusion overlay (git hook) installed
+# CHECK 17 - ASan known-failing-test exclusion overlay (git hook) installed
 # Root cause history: 5 specific ASan interceptor tests are known-failing in
 # this environment; a machine-local (never committed) git post-checkout hook
 # appends them to LIT_FILTER_OUT in the release build script after checkout.
